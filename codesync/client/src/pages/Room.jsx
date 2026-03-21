@@ -7,7 +7,7 @@ import { io } from "socket.io-client";
 import useWebRTC from "../hooks/useWebRTC";
 import VideoChat from "../components/VideoChat";
 
-const SOCKET_URL = "http://localhost:5000";
+const SOCKET_URL = "https://codesync-production-ccd9.up.railway.app";
 
 const Room = () => {
   const { roomId } = useParams();
