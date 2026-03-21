@@ -1,6 +1,5 @@
 {
-  "dependencies": {
-    "@google/generative-ai": "^0.24.1",
-    "groq-sdk": "^1.1.1"
-  }
+  "name": "codesync-root",
+  "version": "1.0.0",
+  "description": "root package - not used for deployment"
 }
