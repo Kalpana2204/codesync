@@ -35,16 +35,18 @@ const register = async (req, res) => {
     // Generate token
     const token = generateToken(user);
 
+    const isProd = process.env.NODE_ENV === "production";
     res.cookie("token", token, {
-   httpOnly: true,
-   secure: true,
-   sameSite: "none",
-   maxAge: 7 * 24 * 60 * 60 * 1000,
-});
+      httpOnly: true,
+      secure: isProd,
+      sameSite: isProd ? "none" : "lax",
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
 
     res.status(201).json({
       message: "User created successfully",
       user: { id: user._id, username: user.username, email: user.email },
+      token,
     });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -71,16 +73,18 @@ const login = async (req, res) => {
     // Generate token
     const token = generateToken(user);
 
-   res.cookie("token", token, {
-  httpOnly: true,
-  secure: true,
-  sameSite: "none",
-  maxAge: 7 * 24 * 60 * 60 * 1000,
-});
+    const isProd = process.env.NODE_ENV === "production";
+    res.cookie("token", token, {
+      httpOnly: true,
+      secure: isProd,
+      sameSite: isProd ? "none" : "lax",
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
 
     res.status(200).json({
       message: "Login successful",
       user: { id: user._id, username: user.username, email: user.email },
+      token,
     });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });

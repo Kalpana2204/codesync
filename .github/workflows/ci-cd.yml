@@ -1,0 +1,93 @@
+name: CodeSync CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # 1. Backend Lint & Integrity Verification
+  backend-checks:
+    name: Backend Lint & Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "npm"
+          cache-dependency-path: codesync/server/package-lock.json
+
+      - name: Install Backend Dependencies
+        working-directory: ./codesync/server
+        run: npm ci
+
+      - name: Syntax & Compilation Check
+        working-directory: ./codesync/server
+        run: |
+          node -c index.js
+          node -c routes/rooms.js
+          node -c routes/execute.js
+          node -c controllers/roomController.js
+          node -c controllers/executionController.js
+          node -c services/aiService.js
+          node -c socket/roomHandler.js
+
+  # 2. Frontend Test & Production Build Verification
+  frontend-checks:
+    name: Frontend Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "npm"
+          cache-dependency-path: codesync/client/package-lock.json
+
+      - name: Install Frontend Dependencies
+        working-directory: ./codesync/client
+        run: npm ci
+
+      - name: Build React Client (Production)
+        working-directory: ./codesync/client
+        env:
+          CI: false
+          REACT_APP_API_URL: /api
+          REACT_APP_SOCKET_URL: /
+        run: npm run build
+
+  # 3. Docker Container Build Verification
+  docker-build:
+    name: Docker Container Build
+    needs: [backend-checks, frontend-checks]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Server Container Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./codesync/server
+          file: ./codesync/server/Dockerfile
+          push: false
+          tags: codesync/server:latest
+
+      - name: Build Client Container Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./codesync/client
+          file: ./codesync/client/Dockerfile
+          push: false
+          tags: codesync/client:latest

@@ -1,6 +1,14 @@
 node_modules/
 .env
+.env*
 */node_modules/
 */.env
+*/.env*
 client/build/
+codesync/client/build/
 server/tmp/
+codesync/server/tmp/
+codesync/server/data/
+codesync-vscode/out/
+codesync-vscode/node_modules/
+*.log

@@ -18,7 +18,7 @@ const { initSocket } = require("./socket/roomHandler");
 const app = express();
 const server = http.createServer(app);
 
-// SIGTERM and SIGINT must be after server is created
+// SIGTERM and SIGINT handlers
 process.on('SIGTERM', () => server.close());
 process.on('SIGINT', () => server.close());
 
@@ -45,17 +45,28 @@ app.use("/api/execute", executeRoutes);
 initSocket(io);
 
 // MongoDB connection
-mongoose
-  .connect(process.env.MONGO_URI)
-  .then(() => console.log("✅ MongoDB connected"))
-  .catch((err) => console.log("❌ MongoDB error:", err));
+const connectDB = async () => {
+  if (!process.env.MONGO_URI) {
+    console.warn("⚠️ No MONGO_URI specified in .env");
+    return;
+  }
+  try {
+    await mongoose.connect(process.env.MONGO_URI, { serverSelectionTimeoutMS: 4000 });
+    console.log("✅ MongoDB connected successfully to", process.env.MONGO_URI.split("@")[1] || "database");
+  } catch (err) {
+    console.warn("⚠️ MongoDB connection warning:", err.message);
+    console.warn("👉 Tip: Check your Atlas cluster status or update MONGO_URI in codesync/server/.env");
+  }
+};
+
+connectDB();
 
 // Start server
-server.listen(process.env.PORT, () => {
-  console.log(`✅ Server running on port ${process.env.PORT}`);
+server.listen(process.env.PORT || 5000, () => {
+  console.log(`✅ CodeSync Server running on port ${process.env.PORT || 5000}`);
 }).on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
-    console.error(`❌ Port ${process.env.PORT} is already in use. Please kill the process first.`);
+    console.error(`❌ Port ${process.env.PORT || 5000} is already in use.`);
     process.exit(1);
   }
 });

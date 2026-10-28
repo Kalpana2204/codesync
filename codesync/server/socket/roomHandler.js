@@ -15,7 +15,11 @@ const initSocket = (io) => {
         if (!rooms.has(roomId)) {
           rooms.set(roomId, { users: new Map() });
         }
-        rooms.get(roomId).users.set(socket.id, { username, cursor: null });
+        rooms.get(roomId).users.set(socket.id, {
+          username,
+          cursor: null,
+          activeFileId: null,
+        });
 
         console.log(`✅ ${username} joined room ${roomId}`);
 
@@ -33,7 +37,24 @@ const initSocket = (io) => {
       }
     });
 
-    // Code change
+    // User switches active file
+    socket.on("active-file-change", ({ roomId, fileId, username }) => {
+      try {
+        if (rooms.has(roomId) && rooms.get(roomId).users.has(socket.id)) {
+          const u = rooms.get(roomId).users.get(socket.id);
+          u.activeFileId = fileId;
+        }
+        socket.to(roomId).emit("user-file-change", {
+          socketId: socket.id,
+          username,
+          fileId,
+        });
+      } catch (error) {
+        console.error("active-file-change error:", error.message);
+      }
+    });
+
+    // Code change for a specific file
     socket.on("code-change", ({ roomId, fileId, code }) => {
       try {
         socket.to(roomId).emit("code-update", { fileId, code });
@@ -42,24 +63,74 @@ const initSocket = (io) => {
       }
     });
 
-    // Save code
-    socket.on("save-code", async ({ fileId, code }) => {
+    // Save code to MongoDB
+    socket.on("save-code", async ({ fileId, code, roomId }) => {
       try {
-        if (!fileId) return;
-        if (!mongoose.Types.ObjectId.isValid(fileId)) return;
-        await File.findByIdAndUpdate(fileId, { content: code });
-        socket.emit("code-saved", { message: "Code saved ✅" });
+        if (!fileId || !mongoose.Types.ObjectId.isValid(fileId)) return;
+        const updated = await File.findByIdAndUpdate(
+          fileId,
+          { content: code },
+          { new: true }
+        );
+        socket.emit("code-saved", {
+          message: "Code saved ✅",
+          fileId,
+          updatedAt: updated?.updatedAt,
+        });
+        if (roomId) {
+          socket.to(roomId).emit("file-synced", { fileId, code });
+        }
       } catch (error) {
         console.error("save-code error:", error.message);
         socket.emit("error", { message: "Failed to save code" });
       }
     });
 
-    // Cursor position change
-    socket.on("cursor-change", ({ roomId, cursor, username }) => {
+    // File created in project tree
+    socket.on("file-created", ({ roomId, file }) => {
       try {
+        socket.to(roomId).emit("file-created", { file });
+      } catch (error) {
+        console.error("file-created error:", error.message);
+      }
+    });
+
+    // File deleted from project tree
+    socket.on("file-deleted", ({ roomId, fileId }) => {
+      try {
+        socket.to(roomId).emit("file-deleted", { fileId });
+      } catch (error) {
+        console.error("file-deleted error:", error.message);
+      }
+    });
+
+    // File or folder renamed
+    socket.on("file-renamed", ({ roomId, file, allFiles }) => {
+      try {
+        socket.to(roomId).emit("file-renamed", { file, allFiles });
+      } catch (error) {
+        console.error("file-renamed error:", error.message);
+      }
+    });
+
+    // Entire project refreshed (e.g. after ZIP import)
+    socket.on("project-refreshed", ({ roomId, files }) => {
+      try {
+        socket.to(roomId).emit("project-refreshed", { files });
+      } catch (error) {
+        console.error("project-refreshed error:", error.message);
+      }
+    });
+
+    // Cursor position change (per-file)
+    socket.on("cursor-change", ({ roomId, fileId, cursor, username }) => {
+      try {
+        if (rooms.has(roomId) && rooms.get(roomId).users.has(socket.id)) {
+          rooms.get(roomId).users.get(socket.id).cursor = cursor;
+        }
         socket.to(roomId).emit("cursor-update", {
           socketId: socket.id,
+          fileId,
           cursor,
           username,
         });
@@ -80,13 +151,14 @@ const initSocket = (io) => {
     // Chat message
     socket.on("send-chat", ({ roomId, username, text }) => {
       try {
-        socket.to(roomId).emit("chat-message", { username, text });
+        const timestamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        socket.to(roomId).emit("chat-message", { username, text, timestamp });
       } catch (error) {
         console.error("send-chat error:", error.message);
       }
     });
 
-    // ← NEW: Broadcast run output to everyone else in the room
+    // Broadcast execution run output to everyone in the room
     socket.on("run-output", ({ roomId, output, username }) => {
       try {
         socket.to(roomId).emit("run-output", { output, username });
@@ -98,29 +170,22 @@ const initSocket = (io) => {
     // ─────────────────────────────────────────────
     // WebRTC Signaling
     // ─────────────────────────────────────────────
-
-    // A user is ready to receive video calls in this room
     socket.on("webrtc:ready", ({ roomId }) => {
       try {
-        // Tell all existing users that a new peer joined (they send offers to the new user)
         socket.to(roomId).emit("webrtc:user-joined", { from: socket.id });
 
-        // Also send the new user a list of ALL existing users in the room
-        // so they can initiate connections to everyone already present
         if (rooms.has(roomId)) {
           const existingUsers = Array.from(rooms.get(roomId).users.keys()).filter(
             (id) => id !== socket.id
           );
           socket.emit("webrtc:existing-users", { users: existingUsers });
         }
-
         console.log(`📹 ${socket.id} is ready for WebRTC in room ${roomId}`);
       } catch (error) {
         console.error("webrtc:ready error:", error.message);
       }
     });
 
-    // Relay SDP offer from one peer to another
     socket.on("webrtc:offer", ({ offer, to }) => {
       try {
         io.to(to).emit("webrtc:offer", { offer, from: socket.id });
@@ -129,7 +194,6 @@ const initSocket = (io) => {
       }
     });
 
-    // Relay SDP answer from one peer to another
     socket.on("webrtc:answer", ({ answer, to }) => {
       try {
         io.to(to).emit("webrtc:answer", { answer, from: socket.id });
@@ -138,7 +202,6 @@ const initSocket = (io) => {
       }
     });
 
-    // Relay ICE candidates between peers
     socket.on("webrtc:ice-candidate", ({ candidate, to }) => {
       try {
         io.to(to).emit("webrtc:ice-candidate", { candidate, from: socket.id });
@@ -165,7 +228,6 @@ const initSocket = (io) => {
               users: Array.from(roomData.users.entries()),
             });
 
-            // Notify peers to close their WebRTC connection with this socket
             socket.to(roomId).emit("webrtc:user-left", { from: socket.id });
           }
         });

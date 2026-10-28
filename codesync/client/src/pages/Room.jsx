@@ -1,376 +1,714 @@
-import { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import Editor from "@monaco-editor/react";
+import { io } from "socket.io-client";
 import { useAuth } from "../context/AuthContext";
 import API from "../utils/api";
-import { io } from "socket.io-client";
 import useWebRTC from "../hooks/useWebRTC";
 import VideoChat from "../components/VideoChat";
+import FileTree from "../components/FileTree/FileTree";
+import CodeEditor from "../components/Editor/CodeEditor";
+import AIPanel from "../components/AIPanel/AIPanel";
+import Chat from "../components/Chat/Chat";
 
-const SOCKET_URL = "https://codesync-production-ccd9.up.railway.app";
+const SOCKET_URL = process.env.REACT_APP_SOCKET_URL || "http://localhost:5000";
 
 const Room = () => {
   const { roomId } = useParams();
   const { user } = useAuth();
   const navigate = useNavigate();
 
+  // Room & File State
   const [room, setRoom] = useState(null);
   const [files, setFiles] = useState([]);
+  const [openFiles, setOpenFiles] = useState([]); // List of opened tab files
   const [activeFile, setActiveFile] = useState(null);
-  const [code, setCode] = useState("// Start coding here\n");
+  const [code, setCode] = useState("");
+  const [isSaved, setIsSaved] = useState(true);
   const [language, setLanguage] = useState("javascript");
+
+  // Users & Presence State
   const [users, setUsers] = useState([]);
+
+  // Execution Console State
   const [output, setOutput] = useState("");
   const [isRunning, setIsRunning] = useState(false);
-  const [isSaved, setIsSaved] = useState(true);
-  const [chatMessages, setChatMessages] = useState([]);
-  const [chatInput, setChatInput] = useState("");
-  const [showChat, setShowChat] = useState(false);
-  const [showAI, setShowAI] = useState(false);
-  const [showVideo, setShowVideo] = useState(false);
-  const [aiMessages, setAiMessages] = useState([]);
-  const [aiInput, setAiInput] = useState("");
-  const [aiLoading, setAiLoading] = useState(false);
+  const [showConsole, setShowConsole] = useState(true);
 
+  // Side Drawers
+  const [activeDrawer, setActiveDrawer] = useState(null); // 'ai' | 'chat' | 'video' | null
+
+  // Chat State
+  const [chatMessages, setChatMessages] = useState([]);
+
+  // Refs
   const socketRef = useRef(null);
   const codeRef = useRef(code);
+  const activeFileRef = useRef(activeFile);
 
+  // Sync refs with state
+  useEffect(() => {
+    codeRef.current = code;
+  }, [code]);
+
+  useEffect(() => {
+    activeFileRef.current = activeFile;
+  }, [activeFile]);
+
+  // WebRTC hook
   const { localStream, peers, micOn, camOn, toggleMic, toggleCam } = useWebRTC(
     socketRef,
     roomId,
-    showVideo
+    activeDrawer === "video"
   );
 
-  // Fetch room data
-  useEffect(() => {
-    const fetchRoom = async () => {
-      try {
-        const res = await API.get(`/rooms/${roomId}`);
-        setRoom(res.data.room);
-        setFiles(res.data.files);
-        setLanguage(res.data.room.language);
-        if (res.data.files.length > 0) {
-          setActiveFile(res.data.files[0]);
-          setCode(res.data.files[0].content);
-          codeRef.current = res.data.files[0].content;
-        }
-      } catch (err) {
-        console.error(err);
-        navigate("/dashboard");
+  // 1. Fetch Room and Files Baseline
+  const fetchRoomData = useCallback(async () => {
+    try {
+      const res = await API.get(`/rooms/${roomId}`);
+      setRoom(res.data.room);
+      const roomFiles = res.data.files || [];
+      setFiles(roomFiles);
+
+      // Select first non-folder file if no active file
+      const nonFolders = roomFiles.filter((f) => !f.isFolder);
+      if (nonFolders.length > 0 && !activeFileRef.current) {
+        const firstFile = nonFolders[0];
+        setActiveFile(firstFile);
+        setCode(firstFile.content || "");
+        setLanguage(firstFile.language || "javascript");
+        setOpenFiles([firstFile]);
       }
-    };
-    fetchRoom();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomId]);
+    } catch (err) {
+      console.error("Failed to load room:", err);
+      navigate("/dashboard");
+    }
+  }, [roomId, navigate]);
 
-  // Socket setup
   useEffect(() => {
-    socketRef.current = io(SOCKET_URL, { withCredentials: true });
+    fetchRoomData();
+  }, [fetchRoomData]);
 
-    socketRef.current.emit("join-room", {
+  // 2. Setup Socket.IO Connection
+  useEffect(() => {
+    const token = localStorage.getItem("codesync_token");
+    socketRef.current = io(SOCKET_URL, {
+      withCredentials: true,
+      auth: { token },
+    });
+
+    const socket = socketRef.current;
+
+    socket.emit("join-room", {
       roomId,
-      username: user?.username,
+      username: user?.username || "Guest",
     });
 
-    socketRef.current.on("code-update", ({ fileId, code }) => {
-      setCode(code);
-      codeRef.current = code;
-    });
-
-    socketRef.current.on("room-users", ({ users }) => {
+    // Room members update
+    socket.on("room-users", ({ users }) => {
       setUsers(users);
     });
 
-    socketRef.current.on("user-joined", ({ username, users }) => {
+    socket.on("user-joined", ({ username, users }) => {
       setUsers(users);
       setChatMessages((prev) => [
         ...prev,
-        { system: true, text: `${username} joined the room` },
+        { system: true, text: `${username} joined the workspace` },
       ]);
     });
 
-    socketRef.current.on("user-left", ({ username, users }) => {
+    socket.on("user-left", ({ username, users }) => {
       setUsers(users);
       setChatMessages((prev) => [
         ...prev,
-        { system: true, text: `${username} left the room` },
+        { system: true, text: `${username} left the workspace` },
       ]);
     });
 
-    socketRef.current.on("chat-message", ({ username, text }) => {
-      setChatMessages((prev) => [...prev, { username, text }]);
+    // Real-time code change in active file
+    socket.on("code-update", ({ fileId, code: remoteCode }) => {
+      if (activeFileRef.current && activeFileRef.current._id === fileId) {
+        setCode(remoteCode);
+        codeRef.current = remoteCode;
+      }
+      // Update in file list cache
+      setFiles((prev) =>
+        prev.map((f) => (f._id === fileId ? { ...f, content: remoteCode } : f))
+      );
     });
 
-    socketRef.current.on("code-saved", () => {
-      setIsSaved(true);
+    // File saved confirmation
+    socket.on("code-saved", ({ fileId }) => {
+      if (activeFileRef.current?._id === fileId) {
+        setIsSaved(true);
+      }
     });
 
-    // ← NEW: receive shared output from whoever clicked Run
-    socketRef.current.on("run-output", ({ output, username }) => {
-      setOutput(`${output}\n\n▶ Ran by ${username}`);
+    // File synchronized from another user
+    socket.on("file-synced", ({ fileId, code: syncedCode }) => {
+      setFiles((prev) =>
+        prev.map((f) => (f._id === fileId ? { ...f, content: syncedCode } : f))
+      );
+    });
+
+    // File created in room by another user
+    socket.on("file-created", ({ file }) => {
+      setFiles((prev) => {
+        if (prev.some((f) => f._id === file._id || f.path === file.path)) return prev;
+        return [...prev, file];
+      });
+    });
+
+    // File deleted in room
+    socket.on("file-deleted", ({ fileId }) => {
+      setFiles((prev) => prev.filter((f) => f._id !== fileId));
+      setOpenFiles((prev) => prev.filter((f) => f._id !== fileId));
+      if (activeFileRef.current?._id === fileId) {
+        const remaining = files.filter((f) => f._id !== fileId && !f.isFolder);
+        if (remaining.length > 0) {
+          handleSelectFile(remaining[0]);
+        } else {
+          setActiveFile(null);
+          setCode("");
+        }
+      }
+    });
+
+    // File renamed in room
+    socket.on("file-renamed", ({ file, allFiles }) => {
+      if (allFiles) {
+        setFiles(allFiles);
+      } else {
+        setFiles((prev) => prev.map((f) => (f._id === file._id ? file : f)));
+      }
+      if (activeFileRef.current?._id === file._id) {
+        setActiveFile(file);
+      }
+    });
+
+    // Project refreshed (e.g. ZIP imported)
+    socket.on("project-refreshed", ({ files: newFiles }) => {
+      setFiles(newFiles);
+      if (newFiles.length > 0) {
+        handleSelectFile(newFiles[0]);
+      }
+    });
+
+    // Chat messages
+    socket.on("chat-message", (msg) => {
+      setChatMessages((prev) => [...prev, msg]);
+    });
+
+    // Broadcasted run output
+    socket.on("run-output", ({ output: remoteOutput, username }) => {
+      setOutput(`${remoteOutput}\n\n▶ Ran by ${username}`);
+      setShowConsole(true);
     });
 
     return () => {
-      socketRef.current.disconnect();
+      socket.disconnect();
     };
-  }, [roomId, user]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomId, user?.username]);
 
-  // Handle code change
-  const handleCodeChange = (value) => {
-    setCode(value);
-    codeRef.current = value;
-    setIsSaved(false);
-    socketRef.current.emit("code-change", {
-      roomId,
-      fileId: activeFile?._id,
-      code: value,
-    });
-  };
+  // 3. Tab & File Switching
+  const handleSelectFile = (file) => {
+    if (file.isFolder) return;
 
-  // Save code
-  const handleSave = () => {
-    socketRef.current.emit("save-code", {
-      fileId: activeFile?._id,
-      code: codeRef.current,
-    });
-  };
-
-  // Copy room ID
-  const copyRoomId = () => {
-    navigator.clipboard.writeText(roomId);
-    alert("Room ID copied! Share it with your friends 🎉");
-  };
-
-  // Send chat message
-  const sendChat = () => {
-    if (!chatInput.trim()) return;
-    socketRef.current.emit("send-chat", {
-      roomId,
-      username: user?.username,
-      text: chatInput,
-    });
-    setChatMessages((prev) => [
-      ...prev,
-      { username: user?.username, text: chatInput, self: true },
-    ]);
-    setChatInput("");
-  };
-
-  // End call + leave room
-  const handleEndCall = () => {
-    setShowVideo(false);
-    if (socketRef.current) {
-      socketRef.current.disconnect();
+    // Save previous file if unsaved
+    if (!isSaved && activeFile) {
+      handleSaveCode();
     }
-    navigate("/dashboard");
+
+    setActiveFile(file);
+    setCode(file.content || "");
+    setLanguage(file.language || "javascript");
+    setIsSaved(true);
+
+    // Add to open tabs if not already open
+    setOpenFiles((prev) => {
+      if (!prev.some((f) => f._id === file._id)) {
+        return [...prev, file];
+      }
+      return prev;
+    });
+
+    // Notify room of active file change
+    if (socketRef.current) {
+      socketRef.current.emit("active-file-change", {
+        roomId,
+        fileId: file._id,
+        username: user?.username,
+      });
+    }
   };
 
-  // ← UPDATED: Run code + broadcast output to everyone
-  const runCode = async () => {
+  const handleCloseTab = (fileIdToClose) => {
+    const nextTabs = openFiles.filter((f) => f._id !== fileIdToClose);
+    setOpenFiles(nextTabs);
+
+    if (activeFile?._id === fileIdToClose) {
+      if (nextTabs.length > 0) {
+        handleSelectFile(nextTabs[nextTabs.length - 1]);
+      } else {
+        setActiveFile(null);
+        setCode("");
+      }
+    }
+  };
+
+  // 4. Code Change & Autosave / Manual Save
+  const handleCodeChange = (newCode) => {
+    setCode(newCode);
+    setIsSaved(false);
+
+    // Update in files state cache
+    if (activeFile) {
+      setFiles((prev) =>
+        prev.map((f) => (f._id === activeFile._id ? { ...f, content: newCode } : f))
+      );
+    }
+
+    // Broadcast delta over socket
+    if (socketRef.current && activeFile) {
+      socketRef.current.emit("code-change", {
+        roomId,
+        fileId: activeFile._id,
+        code: newCode,
+      });
+    }
+  };
+
+  const handleSaveCode = () => {
+    if (!activeFile) return;
+    if (socketRef.current) {
+      socketRef.current.emit("save-code", {
+        fileId: activeFile._id,
+        code: codeRef.current,
+        roomId,
+      });
+    }
+    setIsSaved(true);
+  };
+
+  // 5. Cursor Tracking
+  const handleCursorChange = (cursor) => {
+    if (socketRef.current && activeFile) {
+      socketRef.current.emit("cursor-change", {
+        roomId,
+        fileId: activeFile._id,
+        cursor,
+        username: user?.username,
+      });
+    }
+  };
+
+  // 6. File Explorer Operations
+  const handleCreateFile = async ({ name, path: filePath, isFolder }) => {
+    try {
+      const res = await API.post(`/rooms/${roomId}/files`, {
+        name,
+        path: filePath,
+        isFolder,
+      });
+      const newFile = res.data.file;
+      setFiles((prev) => [...prev, newFile]);
+
+      if (!isFolder) {
+        handleSelectFile(newFile);
+      }
+
+      if (socketRef.current) {
+        socketRef.current.emit("file-created", { roomId, file: newFile });
+      }
+    } catch (err) {
+      alert(`Create failed: ${err.response?.data?.message || err.message}`);
+    }
+  };
+
+  const handleRenameFile = async (fileId, newName) => {
+    try {
+      const res = await API.patch(`/rooms/${roomId}/files/${fileId}/rename`, {
+        newName,
+      });
+      setFiles(res.data.allFiles);
+      if (activeFile?._id === fileId) {
+        setActiveFile(res.data.file);
+      }
+      if (socketRef.current) {
+        socketRef.current.emit("file-renamed", {
+          roomId,
+          file: res.data.file,
+          allFiles: res.data.allFiles,
+        });
+      }
+    } catch (err) {
+      alert(`Rename failed: ${err.response?.data?.message || err.message}`);
+    }
+  };
+
+  const handleDeleteFile = async (fileId) => {
+    try {
+      const res = await API.delete(`/rooms/${roomId}/files/${fileId}`);
+      setFiles(res.data.remainingFiles);
+      setOpenFiles((prev) => prev.filter((f) => f._id !== fileId));
+
+      if (activeFile?._id === fileId) {
+        const remaining = res.data.remainingFiles.filter((f) => !f.isFolder);
+        if (remaining.length > 0) {
+          handleSelectFile(remaining[0]);
+        } else {
+          setActiveFile(null);
+          setCode("");
+        }
+      }
+
+      if (socketRef.current) {
+        socketRef.current.emit("file-deleted", { roomId, fileId });
+      }
+    } catch (err) {
+      alert(`Delete failed: ${err.response?.data?.message || err.message}`);
+    }
+  };
+
+  // 7. Project ZIP Export & Import
+  const handleExportZip = async () => {
+    try {
+      const response = await API.get(`/rooms/${roomId}/export-zip`, {
+        responseType: "blob",
+      });
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement("a");
+      link.href = url;
+      link.setAttribute("download", `${room?.name || "project"}.zip`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (err) {
+      alert("Failed to export ZIP archive.");
+    }
+  };
+
+  const handleImportZip = async (file) => {
+    const formData = new FormData();
+    formData.append("zipFile", file);
+
+    try {
+      const res = await API.post(`/rooms/${roomId}/import-zip`, formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      setFiles(res.data.files);
+
+      const nonFolders = res.data.files.filter((f) => !f.isFolder);
+      if (nonFolders.length > 0) {
+        handleSelectFile(nonFolders[0]);
+      }
+
+      if (socketRef.current) {
+        socketRef.current.emit("project-refreshed", {
+          roomId,
+          files: res.data.files,
+        });
+      }
+    } catch (err) {
+      alert(`ZIP import failed: ${err.response?.data?.message || err.message}`);
+    }
+  };
+
+  // 8. Run Code with Project-Aware Sandbox
+  const handleRunCode = async () => {
     setIsRunning(true);
-    setOutput("⏳ Running code...");
+    setShowConsole(true);
+    setOutput("⏳ Bundling project files & executing in sandbox...\n");
+
     try {
       const res = await API.post("/execute/run", {
         code: codeRef.current,
         language,
+        filename: activeFile?.path,
+        projectFiles: files,
       });
-      const result = `Status: ${res.data.status}\n\n${res.data.output}`;
-      setOutput(result);
 
-      // Broadcast output to all other users in the room
-      socketRef.current.emit("run-output", {
-        roomId,
-        output: result,
-        username: user?.username,
-      });
+      const formatted = `=== Execution Status: ${res.data.status} ===\n\n${res.data.output}`;
+      setOutput(formatted);
+
+      if (socketRef.current) {
+        socketRef.current.emit("run-output", {
+          roomId,
+          output: formatted,
+          username: user?.username,
+        });
+      }
     } catch (err) {
-      setOutput("❌ Execution failed: " + err.message);
+      setOutput(`❌ Execution Failed: ${err.response?.data?.message || err.message}`);
     } finally {
       setIsRunning(false);
     }
   };
 
-  // Ask AI
-  const askAI = async () => {
-    if (!aiInput.trim()) return;
-    const userMessage = aiInput;
-    setAiInput("");
-    setAiMessages((prev) => [...prev, { role: "user", text: userMessage }]);
-    setAiLoading(true);
-    try {
-      const res = await API.post("/execute/ai", {
-        message: userMessage,
-        code: codeRef.current,
-        language,
+  // 9. AI 1-Click Code Fix Application
+  const handleApplyCodeFix = (fixedCode) => {
+    if (!activeFile) return;
+    setCode(fixedCode);
+    codeRef.current = fixedCode;
+    setIsSaved(false);
+
+    if (socketRef.current) {
+      socketRef.current.emit("code-change", {
+        roomId,
+        fileId: activeFile._id,
+        code: fixedCode,
       });
-      setAiMessages((prev) => [
-        ...prev,
-        { role: "ai", text: res.data.reply },
-      ]);
-    } catch (err) {
-      setAiMessages((prev) => [
-        ...prev,
-        { role: "ai", text: "❌ AI failed to respond. Please try again." },
-      ]);
-    } finally {
-      setAiLoading(false);
     }
+  };
+
+  // 10. Send Chat Message
+  const handleSendChatMessage = (text) => {
+    if (socketRef.current) {
+      const timestamp = new Date().toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+      socketRef.current.emit("send-chat", {
+        roomId,
+        username: user?.username,
+        text,
+      });
+      setChatMessages((prev) => [
+        ...prev,
+        { username: user?.username, text, timestamp },
+      ]);
+    }
+  };
+
+  // 11. Copy Room Invite
+  const copyRoomId = () => {
+    navigator.clipboard.writeText(roomId);
+    alert("Workspace ID copied to clipboard! Share it with your team.");
   };
 
   if (!room) {
     return (
-      <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center">
-        <p className="text-gray-400 text-xl">Loading room...</p>
+      <div className="min-h-screen bg-gray-950 text-gray-300 flex items-center justify-center text-sm">
+        <div className="flex items-center gap-3">
+          <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+          <span>Loading CodeSync Workspace...</span>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="h-screen bg-gray-900 text-white flex flex-col overflow-hidden">
+    <div className="h-screen bg-gray-950 text-gray-100 flex flex-col overflow-hidden">
       {/* Top Navbar */}
-      <nav className="bg-gray-800 border-b border-gray-700 px-4 py-2 flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-4">
+      <header className="bg-gray-900 border-b border-gray-800 px-4 py-2 flex items-center justify-between shrink-0 select-none">
+        {/* Left: Project Branding & Name */}
+        <div className="flex items-center gap-3">
           <h1
-            className="text-xl font-bold cursor-pointer"
             onClick={() => navigate("/dashboard")}
+            className="text-base font-bold cursor-pointer hover:opacity-90 flex items-center gap-1.5"
           >
-            Code<span className="text-blue-500">Sync</span>
+            <span className="text-blue-500 font-mono text-lg">&lt;/&gt;</span>
+            <span>Code<span className="text-blue-500">Sync</span></span>
           </h1>
-          <span className="text-gray-400 text-sm">/</span>
-          <span className="text-gray-300 font-medium">{room.name}</span>
-          <span className="bg-blue-500/20 text-blue-400 text-xs px-2 py-1 rounded-full">
-            {language}
+          <span className="text-gray-600">/</span>
+          <span className="text-xs font-semibold text-gray-300">{room.name}</span>
+          <span className="bg-blue-900/30 text-blue-400 border border-blue-800/60 text-[10px] uppercase font-bold px-2 py-0.5 rounded-full">
+            {room.language}
           </span>
         </div>
 
-        <div className="flex items-center gap-3">
-          {/* Online users */}
-          <div className="flex items-center gap-1">
-            {users.slice(0, 4).map(([id, u], i) => (
+        {/* Right: Actions, Users, Collaboration Buttons */}
+        <div className="flex items-center gap-2.5">
+          {/* Active Collaborators */}
+          <div className="flex items-center gap-1.5 mr-2">
+            {users.slice(0, 4).map(([id, u]) => (
               <div
                 key={id}
-                className="w-7 h-7 rounded-full bg-blue-600 flex items-center justify-center text-xs font-bold"
-                title={u.username}
+                title={`${u.username} (Connected)`}
+                className="w-6 h-6 rounded-full bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center text-[10px] font-bold border border-gray-700 shadow"
               >
                 {u.username?.[0]?.toUpperCase()}
               </div>
             ))}
-            <span className="text-gray-400 text-sm ml-1">
+            <span className="text-[11px] text-gray-400 font-mono">
               {users.length} online
             </span>
           </div>
 
-          {/* Save status */}
-          <span className={`text-xs ${isSaved ? "text-green-400" : "text-yellow-400"}`}>
-            {isSaved ? "✅ Saved" : "● Unsaved"}
-          </span>
-
+          {/* Save Button */}
           <button
-            onClick={handleSave}
-            className="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded-lg text-sm transition"
+            onClick={handleSaveCode}
+            className="bg-gray-800 hover:bg-gray-700 text-gray-200 px-3 py-1.5 rounded text-xs transition border border-gray-700"
           >
-            Save
+            💾 Save
           </button>
+
+          {/* Share Button */}
           <button
             onClick={copyRoomId}
-            className="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded-lg text-sm transition"
+            className="bg-gray-800 hover:bg-gray-700 text-gray-200 px-3 py-1.5 rounded text-xs transition border border-gray-700"
           >
             📋 Share
           </button>
+
+          {/* Run Code Button */}
           <button
-            onClick={runCode}
+            onClick={handleRunCode}
             disabled={isRunning}
-            className="bg-green-600 hover:bg-green-700 px-4 py-1.5 rounded-lg text-sm font-bold transition disabled:opacity-50"
+            className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-3.5 py-1.5 rounded text-xs transition disabled:opacity-50 flex items-center gap-1.5 shadow"
           >
-            ▶ Run
+            <span>{isRunning ? "⏳" : "▶"}</span>
+            <span>Run</span>
           </button>
+
+          {/* Toggle AI Drawer */}
           <button
-            onClick={() => { setShowAI(!showAI); setShowChat(false); setShowVideo(false); }}
-            className="bg-purple-600 hover:bg-purple-700 px-3 py-1.5 rounded-lg text-sm transition"
-          >
-            🤖 AI
-          </button>
-          <button
-            onClick={() => { setShowChat(!showChat); setShowAI(false); setShowVideo(false); }}
-            className="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded-lg text-sm transition"
-          >
-            💬 Chat
-          </button>
-          <button
-            onClick={() => { setShowVideo(!showVideo); setShowAI(false); setShowChat(false); }}
-            className={`px-3 py-1.5 rounded-lg text-sm transition ${
-              showVideo
-                ? "bg-blue-600 hover:bg-blue-700"
-                : "bg-gray-700 hover:bg-gray-600"
+            onClick={() => setActiveDrawer((p) => (p === "ai" ? null : "ai"))}
+            className={`px-3 py-1.5 rounded text-xs transition font-semibold flex items-center gap-1.5 ${
+              activeDrawer === "ai"
+                ? "bg-purple-600 text-white"
+                : "bg-gray-800 hover:bg-gray-700 text-purple-300 border border-purple-800/50"
             }`}
           >
-            📹 Video
+            <span>🤖</span>
+            <span>AI Assistant</span>
           </button>
+
+          {/* Toggle Chat Drawer */}
           <button
-            onClick={handleEndCall}
-            className="bg-red-600 hover:bg-red-700 px-3 py-1.5 rounded-lg text-sm font-bold transition"
+            onClick={() => setActiveDrawer((p) => (p === "chat" ? null : "chat"))}
+            className={`px-3 py-1.5 rounded text-xs transition font-semibold flex items-center gap-1.5 ${
+              activeDrawer === "chat"
+                ? "bg-blue-600 text-white"
+                : "bg-gray-800 hover:bg-gray-700 text-blue-300 border border-gray-700"
+            }`}
           >
-            📵 Leave
+            <span>💬</span>
+            <span>Chat</span>
+          </button>
+
+          {/* Toggle Video Call */}
+          <button
+            onClick={() => setActiveDrawer((p) => (p === "video" ? null : "video"))}
+            className={`px-3 py-1.5 rounded text-xs transition font-semibold flex items-center gap-1.5 ${
+              activeDrawer === "video"
+                ? "bg-rose-600 text-white"
+                : "bg-gray-800 hover:bg-gray-700 text-rose-300 border border-gray-700"
+            }`}
+          >
+            <span>📹</span>
+            <span>Video</span>
+          </button>
+
+          {/* Leave Button */}
+          <button
+            onClick={() => navigate("/dashboard")}
+            className="bg-red-700/80 hover:bg-red-600 text-white px-2.5 py-1.5 rounded text-xs font-semibold transition"
+          >
+            Leave
           </button>
         </div>
-      </nav>
+      </header>
 
-      {/* Main Content */}
+      {/* Main Workspace Layout */}
       <div className="flex flex-1 overflow-hidden">
-        {/* File Tree */}
-        <div className="w-48 bg-gray-800 border-r border-gray-700 p-3 shrink-0">
-          <p className="text-gray-400 text-xs uppercase font-bold mb-3">Files</p>
-          {files.map((file) => (
-            <div
-              key={file._id}
-              onClick={() => {
-                setActiveFile(file);
-                setCode(file.content);
-              }}
-              className={`px-3 py-2 rounded-lg cursor-pointer text-sm mb-1 ${
-                activeFile?._id === file._id
-                  ? "bg-blue-600 text-white"
-                  : "text-gray-400 hover:bg-gray-700"
-              }`}
-            >
-              📄 {file.name}
-            </div>
-          ))}
-        </div>
+        {/* Left: Multi-File Explorer */}
+        <aside className="w-56 shrink-0 border-r border-gray-800 overflow-hidden">
+          <FileTree
+            files={files}
+            activeFile={activeFile}
+            onSelectFile={handleSelectFile}
+            onCreateFile={handleCreateFile}
+            onRenameFile={handleRenameFile}
+            onDeleteFile={handleDeleteFile}
+            onExportZip={handleExportZip}
+            onImportZip={handleImportZip}
+          />
+        </aside>
 
-        {/* Editor + Output */}
-        <div className="flex flex-col flex-1 overflow-hidden">
+        {/* Center: Editor + Execution Console */}
+        <main className="flex-1 flex flex-col overflow-hidden">
+          {/* Monaco Code Editor */}
           <div className="flex-1 overflow-hidden">
-            <Editor
-              height="100%"
+            <CodeEditor
+              activeFile={activeFile}
+              code={code}
               language={language}
-              value={code}
-              onChange={handleCodeChange}
-              theme="vs-dark"
-              options={{
-                fontSize: 14,
-                minimap: { enabled: false },
-                scrollBeyondLastLine: false,
-                automaticLayout: true,
-                tabSize: 2,
-                wordWrap: "on",
-                formatOnPaste: true,
-              }}
+              openFiles={openFiles}
+              onSelectTab={handleSelectFile}
+              onCloseTab={handleCloseTab}
+              onChangeCode={handleCodeChange}
+              onSave={handleSaveCode}
+              isSaved={isSaved}
+              onCursorChange={handleCursorChange}
+              collaborators={users}
             />
           </div>
 
-          {/* Output Panel */}
-          <div className="h-36 bg-gray-950 border-t border-gray-700 p-3 overflow-auto shrink-0">
-            <p className="text-gray-400 text-xs uppercase font-bold mb-2">Output</p>
-            <pre className="text-green-400 text-sm font-mono">
-              {output || "// Click ▶ Run to execute your code"}
-            </pre>
-          </div>
-        </div>
+          {/* Bottom Execution Output Console */}
+          {showConsole && (
+            <div className="h-44 bg-[#0e1117] border-t border-gray-800 flex flex-col shrink-0">
+              <div className="px-3 py-1.5 bg-gray-900 border-b border-gray-800 flex items-center justify-between text-xs select-none">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-emerald-400 font-bold">TERMINAL OUTPUT</span>
+                  {isRunning && (
+                    <span className="text-[10px] text-yellow-400 animate-pulse">
+                      ● Executing in Sandbox...
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setOutput("")}
+                    className="text-[10px] text-gray-400 hover:text-white px-2 py-0.5 rounded hover:bg-gray-800"
+                  >
+                    Clear
+                  </button>
+                  <button
+                    onClick={() => setShowConsole(false)}
+                    className="text-[10px] text-gray-400 hover:text-white px-2 py-0.5 rounded hover:bg-gray-800"
+                  >
+                    Hide
+                  </button>
+                </div>
+              </div>
 
-        {/* Video Panel */}
-        {showVideo && (
-          <div className="w-64 bg-gray-800 border-l border-gray-700 flex flex-col shrink-0">
+              <pre className="flex-1 p-3 font-mono text-xs overflow-auto text-gray-300 leading-relaxed whitespace-pre-wrap select-text">
+                {output || "// Output will appear here when you click ▶ Run"}
+              </pre>
+            </div>
+          )}
+        </main>
+
+        {/* Right Drawer: AI Panel */}
+        {activeDrawer === "ai" && (
+          <aside className="w-96 shrink-0 border-l border-gray-800 overflow-hidden">
+            <AIPanel
+              activeFile={activeFile}
+              currentCode={code}
+              language={language}
+              projectFiles={files}
+              onApplyCodeFix={handleApplyCodeFix}
+              onClose={() => setActiveDrawer(null)}
+            />
+          </aside>
+        )}
+
+        {/* Right Drawer: Chat */}
+        {activeDrawer === "chat" && (
+          <aside className="w-80 shrink-0 border-l border-gray-800 overflow-hidden">
+            <Chat
+              messages={chatMessages}
+              onSendMessage={handleSendChatMessage}
+              currentUsername={user?.username}
+              onClose={() => setActiveDrawer(null)}
+            />
+          </aside>
+        )}
+
+        {/* Right Drawer: Video Calling */}
+        {activeDrawer === "video" && (
+          <aside className="w-72 shrink-0 border-l border-gray-800 overflow-hidden">
             <VideoChat
               localStream={localStream}
               peers={peers}
@@ -378,111 +716,9 @@ const Room = () => {
               camOn={camOn}
               toggleMic={toggleMic}
               toggleCam={toggleCam}
-              onEndCall={handleEndCall}
+              onEndCall={() => setActiveDrawer(null)}
             />
-          </div>
-        )}
-
-        {/* AI Panel */}
-        {showAI && (
-          <div className="w-80 bg-gray-800 border-l border-gray-700 flex flex-col shrink-0">
-            <div className="p-3 border-b border-gray-700 flex items-center gap-2">
-              <span>🤖</span>
-              <p className="font-bold text-sm">AI Assistant</p>
-            </div>
-            <div className="flex-1 overflow-y-auto p-3 space-y-3">
-              {aiMessages.length === 0 && (
-                <div className="text-center text-gray-500 text-sm mt-8">
-                  <p className="text-3xl mb-3">🤖</p>
-                  <p>Ask me anything about your code!</p>
-                  <div className="mt-4 space-y-2">
-                    {["Explain this code", "Fix any bugs", "Optimize this code"].map((s) => (
-                      <button
-                        key={s}
-                        onClick={() => setAiInput(s)}
-                        className="block w-full text-left px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-xs transition"
-                      >
-                        {s}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-              {aiMessages.map((msg, i) => (
-                <div key={i} className={`${msg.role === "user" ? "text-right" : ""}`}>
-                  <p className="text-gray-400 text-xs mb-1">
-                    {msg.role === "user" ? "You" : "🤖 AI"}
-                  </p>
-                  <div className={`text-sm px-3 py-2 rounded-lg inline-block max-w-full text-left whitespace-pre-wrap ${
-                    msg.role === "user" ? "bg-blue-600" : "bg-gray-700"
-                  }`}>
-                    {msg.text}
-                  </div>
-                </div>
-              ))}
-              {aiLoading && (
-                <div className="text-gray-400 text-sm">🤖 AI is thinking...</div>
-              )}
-            </div>
-            <div className="p-3 border-t border-gray-700 flex gap-2">
-              <input
-                value={aiInput}
-                onChange={(e) => setAiInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && askAI()}
-                placeholder="Ask AI about your code..."
-                className="flex-1 bg-gray-700 text-white rounded-lg px-3 py-2 text-sm outline-none"
-              />
-              <button
-                onClick={askAI}
-                disabled={aiLoading}
-                className="bg-purple-600 hover:bg-purple-700 px-3 py-2 rounded-lg text-sm transition disabled:opacity-50"
-              >
-                ➤
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Chat Panel */}
-        {showChat && (
-          <div className="w-64 bg-gray-800 border-l border-gray-700 flex flex-col shrink-0">
-            <div className="p-3 border-b border-gray-700">
-              <p className="font-bold text-sm">Room Chat</p>
-            </div>
-            <div className="flex-1 overflow-y-auto p-3 space-y-2">
-              {chatMessages.map((msg, i) => (
-                <div key={i}>
-                  {msg.system ? (
-                    <p className="text-gray-500 text-xs text-center">{msg.text}</p>
-                  ) : (
-                    <div className={`${msg.self ? "text-right" : ""}`}>
-                      <p className="text-gray-400 text-xs mb-1">{msg.username}</p>
-                      <span className={`text-sm px-3 py-1.5 rounded-lg inline-block ${
-                        msg.self ? "bg-blue-600" : "bg-gray-700"
-                      }`}>
-                        {msg.text}
-                      </span>
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-            <div className="p-3 border-t border-gray-700 flex gap-2">
-              <input
-                value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && sendChat()}
-                placeholder="Type a message..."
-                className="flex-1 bg-gray-700 text-white rounded-lg px-3 py-2 text-sm outline-none"
-              />
-              <button
-                onClick={sendChat}
-                className="bg-blue-600 hover:bg-blue-700 px-3 py-2 rounded-lg text-sm transition"
-              >
-                ➤
-              </button>
-            </div>
-          </div>
+          </aside>
         )}
       </div>
     </div>
