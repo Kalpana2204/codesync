@@ -11,10 +11,40 @@ const generateToken = (user) => {
   );
 };
 
+// Validate password complexity
+const validatePassword = (password) => {
+  if (!password || password.length < 8) {
+    return "Password must be at least 8 characters long.";
+  }
+  if (!/[A-Z]/.test(password)) {
+    return "Password must contain at least one uppercase letter (A-Z).";
+  }
+  if (!/[a-z]/.test(password)) {
+    return "Password must contain at least one lowercase letter (a-z).";
+  }
+  if (!/[0-9]/.test(password)) {
+    return "Password must contain at least one number (0-9).";
+  }
+  if (!/[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?`~]/.test(password)) {
+    return "Password must contain at least one special symbol (!@#$%^&* etc.).";
+  }
+  return null;
+};
+
 // Register
 const register = async (req, res) => {
   try {
     const { username, email, password } = req.body;
+
+    if (!username || !email || !password) {
+      return res.status(400).json({ message: "All fields are required" });
+    }
+
+    // Enforce password security policy
+    const passwordError = validatePassword(password);
+    if (passwordError) {
+      return res.status(400).json({ message: passwordError });
+    }
 
     // Check if user exists
     const existingUser = await User.findOne({ $or: [{ email }, { username }] });

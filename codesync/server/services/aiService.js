@@ -1,6 +1,6 @@
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
-const getGeminiModel = (modelName = "gemini-1.5-flash") => {
+const getGeminiModel = (modelName = "gemini-3.8-flash") => {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey || apiKey === "your_gemini_api_key") {
     throw new Error("GEMINI_API_KEY is not configured in server environment.");
@@ -47,14 +47,13 @@ Instructions:
 `;
 
   try {
-    const model = getGeminiModel("gemini-1.5-flash");
+    const model = getGeminiModel("gemini-3.8-flash");
     const result = await model.generateContent(prompt);
     const response = await result.response;
     return response.text();
   } catch (err) {
-    // Attempt fallback model if 1.5-flash encounters a quota or model naming difference
     try {
-      const fallbackModel = getGeminiModel("gemini-1.5-pro");
+      const fallbackModel = getGeminiModel("gemini-2.5-flash");
       const result = await fallbackModel.generateContent(prompt);
       const response = await result.response;
       return response.text();
@@ -93,10 +92,17 @@ Identify asymptotic complexity bottlenecks, redundant operations, or unnecessary
 Concrete improvement steps with clear before/after examples.
 `;
 
-  const model = getGeminiModel("gemini-1.5-flash");
-  const result = await model.generateContent(prompt);
-  const response = await result.response;
-  return response.text();
+  try {
+    const model = getGeminiModel("gemini-3.8-flash");
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    return response.text();
+  } catch (err) {
+    const fallbackModel = getGeminiModel("gemini-2.5-flash");
+    const result = await fallbackModel.generateContent(prompt);
+    const response = await result.response;
+    return response.text();
+  }
 };
 
 // 3. Code Explanation
@@ -115,10 +121,17 @@ Instructions:
 4. Mention expected inputs, outputs, and edge behaviors.
 Keep formatting clean and easy to read.`;
 
-  const model = getGeminiModel("gemini-1.5-flash");
-  const result = await model.generateContent(prompt);
-  const response = await result.response;
-  return response.text();
+  try {
+    const model = getGeminiModel("gemini-3.8-flash");
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    return response.text();
+  } catch (err) {
+    const fallbackModel = getGeminiModel("gemini-2.5-flash");
+    const result = await fallbackModel.generateContent(prompt);
+    const response = await result.response;
+    return response.text();
+  }
 };
 
 // 4. Generate Fix / Patch with Direct Replacement
@@ -143,10 +156,18 @@ IMPORTANT: You must format your final corrected code inside a single markdown co
 \`\`\`
 Do not abbreviate code with comments like "// rest of code remains the same"; output the entire runnable file.`;
 
-  const model = getGeminiModel("gemini-1.5-flash");
-  const result = await model.generateContent(prompt);
-  const response = await result.response;
-  const replyText = response.text();
+  let replyText = "";
+  try {
+    const model = getGeminiModel("gemini-3.8-flash");
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    replyText = response.text();
+  } catch (err) {
+    const fallbackModel = getGeminiModel("gemini-2.5-flash");
+    const result = await fallbackModel.generateContent(prompt);
+    const response = await result.response;
+    replyText = response.text();
+  }
 
   // Extract the code block from the response
   const codeBlockMatch = replyText.match(/```(?:[a-zA-Z0-9_-]+)?\s*([\s\S]*?)```/);
